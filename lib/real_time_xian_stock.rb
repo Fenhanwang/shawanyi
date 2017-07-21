@@ -55,11 +55,10 @@ class RealTimeXianStock
   def loop_stock_array
     if @db.collection_names.size == 0
       crawl_stock_name
+    else
+      @stock_abb_array = @client[:stocks].find({}).map{|e| e["stock_name"]}
     end
-    @stock_abb_array = @client[:stocks].find({}).map{|e| e["stock_name"]}
     @stock_abb_array.each_slice(100) {|su_arr|
-      sub_url  = su_arr.join("+")
-
       # http://wern-ancheta.com/blog/2015/04/05/getting-started-with-the-yahoo-finance-api/
       # s: Symbol, a: Ask, b: Bid, b2: Ask (Realtime), b3: Bid (Realtime), k: 52 Week High, j: 52 week Low, 
       # j6: Percent Change From 52 week Low, k5: Percent Change From 52 week High, v: Volume, j1: Market Capitalization
@@ -74,9 +73,17 @@ class RealTimeXianStock
       # d2 – trade date
       # t1 – last trade time
       # c8 – after hours change
+      sub_url  = su_arr.join(",")
+      full_url = "http://finance.google.com/finance/info?client=ig&q=NASDAQ%3A#{sub_url}"
+      get_stockinfo_from_google(full_url)
 
-      full_url = "http://download.finance.yahoo.com/d/quotes.csv?s=#{sub_url}&f=sc1cc6k2p2d1d2t1c8"
-      get_stockinfo_from_yahoo(full_url)
+
+      # if ( Time.now.min / 10 ).even?
+      #   sub_url  = su_arr.join("+")
+      #   full_url = "http://download.finance.yahoo.com/d/quotes.csv?s=#{sub_url}&f=sc1cc6k2p2d1d2t1c8"
+      #   get_stockinfo_from_yahoo(full_url)
+      # else
+      # end
     }
   end
 
@@ -130,6 +137,77 @@ class RealTimeXianStock
         @count += 1
       end
     end
+  end
+
+  def get_stockinfo_from_google(url)
+    begin
+      respon = open(url)
+      raise "connecton" unless respon.status.first == "200"
+    rescue
+      binding.pry
+      sleep 1
+      retry            
+    end
+    result_arr = JSON.parse(respon.read.gsub(/\n|\/\//, ''))
+    result_arr.each { |e|
+      stock_name    = e["t"]
+      changed_value = e["c"].gsub(/\+|\-|\%/, '').to_f
+      percent_stri  = e["cp"]
+      unless e["ec"].nil?
+        pre_changeval = e["ec"].to_s.gsub(/\+|\-|\%/, '').to_f
+        pre_market_ch = e["ecp"]
+        pre_percent_num = pre_market_ch.gsub(/\+|\-|\%/, '').to_f
+      end
+      iS_increased  = false
+      iS_pre_increase = false
+      iS_xiangu     = false
+      if e["c"] =~ /\+/
+        iS_increased = true
+      end
+      if e["ec"] =~ /\+/
+        iS_pre_increase = true
+      end
+      percent_num = percent_stri.gsub(/\+|\-|\%/, '').to_f
+      # binding.pry if stock_name == "ESES"
+      trade_date = e["lt_dts"] #%d\%m%m\xxxx
+      if ( iS_increased and percent_num > 20 ) or (iS_pre_increase and pre_percent_num > 5 )
+        puts "#{@count}"
+        puts "Name: #{stock_name},  increase?: #{iS_increased}, percent: #{percent_num}, last_time: #{trade_date}, pre-market: #{pre_percent_num}"
+        puts ""
+      end
+      minutes_run = ( Time.now.to_i - Time.parse("#{Time.now.strftime('%Y-%m-%d')} 09:30:00").to_i) / 60
+      collection = @client[:stocks]
+      three_minute_rate = percent_num / minutes_run * 3
+
+  # ============== how to define a xian gu ======================
+      if ( percent_num > 30 and iS_increased ) or ( iS_pre_increase and pre_percent_num > 5 )
+        iS_xiangu = true
+      elsif ( three_minute_rate ) > 9 and iS_increased
+        iS_xiangu = true
+      end
+  # ================================================================
+
+
+      if collection.find( { stock_name:  stock_name } ).first.nil?
+        result = collection.insert_one({ stock_name: stock_name, 
+                                         stock_increased: iS_increased,
+                                         percent_num: percent_num,
+                                         three_minute_rate: three_minute_rate,
+                                         pre_market: pre_percent_num,
+                                         xian_gu: iS_xiangu
+        })
+      else
+        result = collection.update_one( { stock_name: stock_name },
+                                        { '$set': { stock_increased: iS_increased,
+                                                    percent_num: percent_num,
+                                                    three_minute_rate: three_minute_rate,
+                                                    pre_market: pre_percent_num,
+                                                    xian_gu: iS_xiangu 
+                                      } } )
+      end
+      @count += 1
+
+    }
   end
 
 end
